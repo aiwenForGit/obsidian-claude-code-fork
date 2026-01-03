@@ -335,8 +335,10 @@ describe("ConversationManager (real)", () => {
     it("should handle non-existent conversation gracefully", async () => {
       await manager.initialize();
 
-      // Should not throw.
-      await manager.updateSessionIdForConversation("non-existent", "session-abc");
+      // Should not throw - verify by checking the promise resolves.
+      await expect(
+        manager.updateSessionIdForConversation("non-existent", "session-abc")
+      ).resolves.toBeUndefined();
     });
   });
 

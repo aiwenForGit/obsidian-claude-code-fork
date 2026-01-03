@@ -163,6 +163,7 @@ describe("pathUtils property tests", () => {
       fc.assert(
         fc.property(
           // Use ASCII strings to avoid unicode normalization issues.
+          // eslint-disable-next-line no-control-regex
           fc.string({ maxLength: 100 }).filter((s) => /^[\x00-\x7F]*$/.test(s)),
           (path) => {
             const once = normalizeVaultPath(path);

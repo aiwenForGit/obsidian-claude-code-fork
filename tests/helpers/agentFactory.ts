@@ -105,11 +105,14 @@ export function waitForEvents(ms = 10): Promise<void> {
 }
 
 // Helper to configure the fs mock for findClaudeExecutable.
-// Note: fs is already mocked in setup.ts, this helper configures the mock.
-export function mockFsForClaudeExecutable(claudePath = "/usr/local/bin/claude"): void {
+// Note: fs is already mocked in setup.ts, this helper ensures claude paths are found.
+export function mockFsForClaudeExecutable(): void {
   // Use the imported fs module (which should be mocked by setup.ts).
   const existsSyncMock = fs.existsSync as Mock;
   if (typeof existsSyncMock.mockImplementation === "function") {
-    existsSyncMock.mockImplementation((path: string) => path === claudePath);
+    // Return true for any path containing "claude" to handle various install locations.
+    existsSyncMock.mockImplementation((path: string) =>
+      typeof path === "string" && path.includes("claude")
+    );
   }
 }
