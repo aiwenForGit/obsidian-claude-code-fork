@@ -28,6 +28,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
