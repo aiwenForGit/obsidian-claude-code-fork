@@ -45,11 +45,12 @@ export class MessageRenderer {
     this.contentEl.empty();
 
     // Render markdown content.
+    // Use "/" as source path so relative links resolve from vault root.
     MarkdownRenderer.render(
       this.plugin.app,
       this.message.content,
       this.contentEl,
-      "",
+      "/",
       this.plugin,
     );
 
@@ -91,23 +92,80 @@ export class MessageRenderer {
 
   // Check if a string looks like a vault file path.
   private isVaultPath(text: string): boolean {
+    // Skip external URLs.
+    if (text.includes("://") || text.startsWith("http")) {
+      return false;
+    }
+
     // Common vault file extensions.
     const extensions = [".md", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".canvas"];
     const lowerText = text.toLowerCase();
 
     // Check if it ends with a known extension.
     if (extensions.some((ext) => lowerText.endsWith(ext))) {
-      return true;
+      // Verify the file exists in the vault.
+      return this.findFile(text) !== null;
     }
 
-    // Check if it looks like a relative path (contains / and no protocol).
-    if (text.includes("/") && !text.includes("://") && !text.startsWith("http")) {
-      // Verify the file might exist in the vault.
-      const file = this.plugin.app.vault.getAbstractFileByPath(text);
-      if (file) return true;
+    // Check if it looks like a relative path (contains /).
+    if (text.includes("/") || text.includes("\\")) {
+      // Verify the file exists in the vault.
+      return this.findFile(text) !== null;
     }
 
     return false;
+  }
+
+  // Normalize a file path for vault lookup.
+  private normalizePath(path: string): string {
+    // Remove leading slashes and backslashes.
+    let normalized = path.replace(/^[/\\]+/, "");
+
+    // Replace backslashes with forward slashes (Windows paths).
+    normalized = normalized.replace(/\\/g, "/");
+
+    // Remove URL encoding.
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch (e) {
+      // Ignore decode errors.
+    }
+
+    // Remove vault path prefix if present.
+    const vaultBasePath = (this.plugin.app.vault.adapter as any).basePath;
+    if (vaultBasePath && normalized.startsWith(vaultBasePath)) {
+      normalized = normalized.slice(vaultBasePath.length);
+      normalized = normalized.replace(/^[/\\]+/, "");
+    }
+
+    return normalized;
+  }
+
+  // Try to find a file by path with various fallbacks.
+  private findFile(path: string): TFile | null {
+    const normalized = this.normalizePath(path);
+
+    // Try exact path.
+    let file = this.plugin.app.vault.getAbstractFileByPath(normalized);
+    if (file instanceof TFile) return file;
+
+    // Try with .md extension if not present.
+    if (!normalized.endsWith(".md")) {
+      file = this.plugin.app.vault.getAbstractFileByPath(normalized + ".md");
+      if (file instanceof TFile) return file;
+    }
+
+    // Try without leading folder paths (search by filename).
+    const filename = normalized.split("/").pop() || normalized;
+    const allFiles = this.plugin.app.vault.getFiles();
+    const match = allFiles.find((f) =>
+      f.path === normalized ||
+      f.path.endsWith("/" + normalized) ||
+      f.name === filename ||
+      f.basename === filename.replace(/\.md$/, "")
+    );
+
+    return match || null;
   }
 
   // Make an element clickable to open a vault file.
@@ -120,20 +178,13 @@ export class MessageRenderer {
       e.preventDefault();
       e.stopPropagation();
 
-      // Try to open the file in Obsidian.
-      const file = this.plugin.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile) {
+      // Try to find and open the file.
+      const file = this.findFile(path);
+      if (file) {
         await this.plugin.app.workspace.getLeaf(false).openFile(file);
       } else {
-        // Try with common variations (might be missing .md extension).
-        const withMd = path.endsWith(".md") ? path : `${path}.md`;
-        const fileWithMd = this.plugin.app.vault.getAbstractFileByPath(withMd);
-        if (fileWithMd instanceof TFile) {
-          await this.plugin.app.workspace.getLeaf(false).openFile(fileWithMd);
-        } else {
-          // Show a notice that file wasn't found.
-          new (require("obsidian").Notice)(`File not found: ${path}`);
-        }
+        // Show a notice that file wasn't found.
+        new (require("obsidian").Notice)(`File not found: ${path}`);
       }
     });
   }
@@ -175,7 +226,7 @@ export class MessageRenderer {
         }
 
         // Check if this path exists in the vault before making it clickable.
-        const file = this.plugin.app.vault.getAbstractFileByPath(path);
+        const file = this.findFile(path);
         if (file) {
           // Create clickable span.
           const span = document.createElement("span");
