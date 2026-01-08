@@ -4,6 +4,7 @@ import type ClaudeCodePlugin from "../main";
 import { ChatMessage, ToolCall, AgentEvents, SubagentProgress, ErrorType } from "../types";
 import { createObsidianMcpServer, ObsidianMcpServerInstance } from "./ObsidianMcpServer";
 import { logger } from "../utils/Logger";
+import { spawn, ChildProcess } from "child_process";
 
 // Type for content blocks from the SDK.
 interface TextBlock {
@@ -168,6 +169,120 @@ export class AgentController {
           // Explicitly set the Claude Code executable path.
           // This is required in bundled environments like Obsidian where import.meta.url doesn't work.
           pathToClaudeCodeExecutable: claudeExecutable,
+
+          // Custom spawn function to handle Windows .cmd files properly.
+          // On Windows, .cmd files cannot be spawned directly without shell: true.
+          // Also handles --mcp-config JSON argument quoting issues on Windows.
+          spawnClaudeCodeProcess: (spawnOptions: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal }) => {
+            const { command, args: originalArgs, cwd, env: spawnEnv, signal } = spawnOptions;
+            const isWindows = process.platform === "win32";
+            const isCmdFile = command.endsWith(".cmd") || command.endsWith(".bat");
+
+            // On Windows with shell: true, JSON arguments get mangled.
+            // Write MCP config to a temp file and pass the path instead.
+            let args = [...originalArgs];
+            let tempMcpConfigPath: string | undefined = undefined;
+
+            if (isWindows && isCmdFile) {
+              const mcpConfigIndex = args.indexOf("--mcp-config");
+              if (mcpConfigIndex !== -1 && mcpConfigIndex + 1 < args.length) {
+                const mcpConfigJson = args[mcpConfigIndex + 1];
+                // Check if it's JSON (starts with { and ends with }).
+                if (mcpConfigJson.startsWith("{") && mcpConfigJson.endsWith("}")) {
+                  const fs = require("fs");
+                  const path = require("path");
+                  const os = require("os");
+
+                  // Create a temp file for the MCP config.
+                  const tempDir = os.tmpdir();
+                  const configFilePath: string = path.join(tempDir, `obsidian-claude-mcp-${Date.now()}.json`);
+
+                  try {
+                    fs.writeFileSync(configFilePath, mcpConfigJson, "utf-8");
+                    // Replace the JSON with the file path.
+                    args[mcpConfigIndex + 1] = configFilePath;
+                    tempMcpConfigPath = configFilePath;
+                    logger.info("AgentController", "Wrote MCP config to temp file", {
+                      tempPath: configFilePath,
+                      configLength: mcpConfigJson.length
+                    });
+                  } catch (e) {
+                    logger.error("AgentController", "Failed to write MCP config temp file", { error: String(e) });
+                    // Continue with original args - will likely fail but worth trying.
+                  }
+                }
+              }
+            }
+
+            logger.info("AgentController", "Spawning Claude Code process", {
+              command,
+              args: args.join(" "),
+              cwd,
+              isWindows,
+              isCmdFile,
+              hasApiKey: !!spawnEnv.ANTHROPIC_API_KEY,
+              hasOAuth: !!spawnEnv.CLAUDE_CODE_OAUTH_TOKEN,
+              tempMcpConfigPath,
+            });
+
+            const childProcess: ChildProcess = spawn(command, args, {
+              cwd,
+              stdio: ["pipe", "pipe", "pipe"],
+              signal,
+              env: spawnEnv,
+              windowsHide: true,
+              // On Windows, .cmd files require shell: true to execute properly.
+              shell: isWindows && isCmdFile,
+            });
+
+            // Clean up temp file when process exits.
+            if (tempMcpConfigPath) {
+              const pathToClean = tempMcpConfigPath;  // Capture in closure to avoid null check issues.
+              const cleanupTempFile = () => {
+                try {
+                  const fs = require("fs");
+                  if (fs.existsSync(pathToClean)) {
+                    fs.unlinkSync(pathToClean);
+                    logger.debug("AgentController", "Cleaned up temp MCP config file", { path: pathToClean });
+                  }
+                } catch (e) {
+                  // Ignore cleanup errors.
+                }
+              };
+              childProcess.on("exit", cleanupTempFile);
+              childProcess.on("error", cleanupTempFile);
+            }
+
+            // Accumulate stderr for debugging.
+            let stderrOutput = "";
+            childProcess.stderr?.on("data", (data: Buffer) => {
+              const msg = data.toString();
+              stderrOutput += msg;
+              logger.warn("AgentController", "Claude stderr chunk", { message: msg });
+            });
+
+            childProcess.on("exit", (code: number | null, signal: string | null) => {
+              if (code !== 0) {
+                logger.error("AgentController", "Claude process exited with error", {
+                  code,
+                  signal,
+                  stderr: stderrOutput,
+                  stderrLength: stderrOutput.length
+                });
+              }
+            });
+
+            return {
+              stdin: childProcess.stdin!,
+              stdout: childProcess.stdout!,
+              get killed() { return childProcess.killed; },
+              get exitCode() { return childProcess.exitCode; },
+              kill: childProcess.kill.bind(childProcess),
+              on: childProcess.on.bind(childProcess),
+              once: childProcess.once.bind(childProcess),
+              off: childProcess.off.bind(childProcess),
+            };
+          },
 
           // Model selection using simplified names (sonnet, opus, haiku).
           model: this.plugin.settings.model || "sonnet",
@@ -708,47 +823,104 @@ export class AgentController {
     const fs = require("fs");
     const path = require("path");
     const os = require("os");
+    const { execSync } = require("child_process");
     const homeDir = os.homedir();
+    const isWindows = os.platform() === "win32";
 
-    // Common locations to check.
-    const possiblePaths = [
-      // User's npm global bin from NVM_BIN env var.
-      process.env.NVM_BIN ? `${process.env.NVM_BIN}/claude` : null,
-
-      // Common nvm paths - check multiple node versions.
-      `${homeDir}/.nvm/versions/node/v20.11.1/bin/claude`,
-      `${homeDir}/.nvm/versions/node/v22.0.0/bin/claude`,
-      `${homeDir}/.nvm/versions/node/v21.0.0/bin/claude`,
-      `${homeDir}/.nvm/versions/node/v18.0.0/bin/claude`,
-
-      // npm global without nvm.
-      `${homeDir}/.npm-global/bin/claude`,
-      `${homeDir}/npm/bin/claude`,
-
-      // Standard npm global.
-      "/usr/local/bin/claude",
-
-      // Homebrew on macOS.
-      "/opt/homebrew/bin/claude",
-
-      // Linux global.
-      "/usr/bin/claude",
-    ].filter(Boolean) as string[];
-
-    // Also check all nvm versions dynamically.
-    const nvmDir = `${homeDir}/.nvm/versions/node`;
+    // First, try to find claude in PATH using system command.
+    // This handles custom installation paths.
     try {
-      if (fs.existsSync(nvmDir)) {
-        const versions = fs.readdirSync(nvmDir);
-        for (const ver of versions) {
-          const claudePath = path.join(nvmDir, ver, "bin", "claude");
-          if (!possiblePaths.includes(claudePath)) {
-            possiblePaths.push(claudePath);
-          }
+      const cmd = isWindows ? "where claude" : "which claude";
+      const result = execSync(cmd, { encoding: "utf-8", timeout: 5000 }).trim();
+      if (result) {
+        // "where" on Windows may return multiple lines, take the first .cmd or first result.
+        const lines = result.split(/\r?\n/).filter(Boolean);
+        const cmdPath = lines.find((l: string) => l.endsWith(".cmd")) || lines[0];
+        if (cmdPath && fs.existsSync(cmdPath)) {
+          logger.info("AgentController", "Found Claude executable via PATH", { path: cmdPath });
+          return cmdPath;
         }
       }
     } catch (e) {
-      // Ignore.
+      // claude not in PATH, continue with hardcoded paths.
+    }
+
+    // Common locations to check.
+    const possiblePaths: string[] = [];
+
+    if (isWindows) {
+      // Windows: npm global install locations.
+      const appData = process.env.APPDATA || path.join(homeDir, "AppData", "Roaming");
+      const localAppData = process.env.LOCALAPPDATA || path.join(homeDir, "AppData", "Local");
+
+      possiblePaths.push(
+        // npm global (most common).
+        path.join(appData, "npm", "claude.cmd"),
+        path.join(appData, "npm", "claude"),
+
+        // pnpm global.
+        path.join(localAppData, "pnpm", "claude.cmd"),
+        path.join(localAppData, "pnpm", "claude"),
+
+        // yarn global.
+        path.join(localAppData, "Yarn", "bin", "claude.cmd"),
+        path.join(localAppData, "Yarn", "bin", "claude"),
+
+        // nvm-windows.
+        ...(process.env.NVM_SYMLINK ? [
+          path.join(process.env.NVM_SYMLINK, "claude.cmd"),
+          path.join(process.env.NVM_SYMLINK, "claude"),
+        ] : []),
+
+        // Scoop.
+        path.join(homeDir, "scoop", "shims", "claude.cmd"),
+
+        // Chocolatey.
+        "C:\\ProgramData\\chocolatey\\bin\\claude.cmd",
+      );
+    } else {
+      // Unix/macOS paths.
+      possiblePaths.push(
+        // User's npm global bin from NVM_BIN env var.
+        ...(process.env.NVM_BIN ? [`${process.env.NVM_BIN}/claude`] : []),
+
+        // Common nvm paths - check multiple node versions.
+        `${homeDir}/.nvm/versions/node/v20.11.1/bin/claude`,
+        `${homeDir}/.nvm/versions/node/v22.0.0/bin/claude`,
+        `${homeDir}/.nvm/versions/node/v21.0.0/bin/claude`,
+        `${homeDir}/.nvm/versions/node/v18.0.0/bin/claude`,
+
+        // npm global without nvm.
+        `${homeDir}/.npm-global/bin/claude`,
+        `${homeDir}/npm/bin/claude`,
+
+        // Standard npm global.
+        "/usr/local/bin/claude",
+
+        // Homebrew on macOS.
+        "/opt/homebrew/bin/claude",
+
+        // Linux global.
+        "/usr/bin/claude",
+      );
+    }
+
+    // Also check all nvm versions dynamically (Unix only).
+    if (!isWindows) {
+      const nvmDir = `${homeDir}/.nvm/versions/node`;
+      try {
+        if (fs.existsSync(nvmDir)) {
+          const versions = fs.readdirSync(nvmDir);
+          for (const ver of versions) {
+            const claudePath = path.join(nvmDir, ver, "bin", "claude");
+            if (!possiblePaths.includes(claudePath)) {
+              possiblePaths.push(claudePath);
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore.
+      }
     }
 
     // Check if any exist.
