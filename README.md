@@ -1,4 +1,4 @@
-# obsidian-claude-code
+# obsidian-claude-code for window 11
 
 A native Obsidian plugin that embeds Claude as an AI assistant directly within your vault. Built on the Claude Agent SDK, the plugin provides a persistent chat sidebar with full access to vault operations through built-in tools, skill loading, and custom Obsidian-specific actions.
 
@@ -10,7 +10,7 @@ obsidian-claude-code transforms Obsidian into an AI-augmented knowledge environm
 
 This is a desktop-only plugin. The Claude Agent SDK requires Node.js runtime, which is available in Obsidian's Electron environment but not on mobile platforms.
 
-## Installation
+## Installation for window
 
 Clone the repository into your vault's plugin directory:
 
