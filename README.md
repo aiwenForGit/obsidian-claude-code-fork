@@ -1,5 +1,6 @@
 # obsidian-claude-code for window 11
 
+fork from https://github.com/Roasbeef/obsidian-claude-code
 增加了功能：
 1）mcp可以自定义；
 2）支持兼容openai接口；
