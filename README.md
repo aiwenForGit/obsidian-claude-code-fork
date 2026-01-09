@@ -1,5 +1,14 @@
 # obsidian-claude-code for window 11
 
+增加了功能：
+1）mcp可以自定义；
+2）支持兼容openai接口；
+
+Added features:
+
+MCP can be customized;
+Supports compatibility with the OpenAI interface;
+
 A native Obsidian plugin that embeds Claude as an AI assistant directly within your vault. Built on the Claude Agent SDK, the plugin provides a persistent chat sidebar with full access to vault operations through built-in tools, skill loading, and custom Obsidian-specific actions.
 
 ## Overview
