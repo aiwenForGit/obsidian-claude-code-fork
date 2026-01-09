@@ -77,6 +77,55 @@ export class AgentController {
     return adapter.basePath || "";
   }
 
+  // Build MCP servers configuration from built-in and user-configured servers.
+  private buildMcpServersConfig(): Record<string, any> {
+    const servers: Record<string, any> = {
+      // Always include the built-in Obsidian MCP server.
+      obsidian: this.obsidianMcp,
+    };
+
+    // Add user-configured MCP servers.
+    const userServers = this.plugin.settings.mcpServers || [];
+    for (const server of userServers) {
+      // Only include enabled servers.
+      if (!server.enabled) {
+        logger.debug("AgentController", `Skipping disabled MCP server: ${server.name}`);
+        continue;
+      }
+
+      // Build stdio server config.
+      const config: {
+        type?: "stdio";
+        command: string;
+        args?: string[];
+        env?: Record<string, string>;
+      } = {
+        command: server.command,
+      };
+
+      if (server.args && server.args.length > 0) {
+        config.args = server.args;
+      }
+
+      if (server.env && Object.keys(server.env).length > 0) {
+        config.env = server.env;
+      }
+
+      servers[server.name] = config;
+      logger.info("AgentController", `Added user MCP server: ${server.name}`, {
+        command: server.command,
+        args: server.args,
+        hasEnv: !!server.env,
+      });
+    }
+
+    logger.info("AgentController", `Total MCP servers configured: ${Object.keys(servers).length}`, {
+      serverNames: Object.keys(servers),
+    });
+
+    return servers;
+  }
+
   // Set event handlers for UI updates.
   setEventHandlers(events: Partial<AgentEvents>) {
     this.events = events;
@@ -294,10 +343,8 @@ export class AgentController {
           systemPrompt: { type: "preset", preset: "claude_code" },
           tools: { type: "preset", preset: "claude_code" },
 
-          // Add our Obsidian-specific tools.
-          mcpServers: {
-            obsidian: this.obsidianMcp,
-          },
+          // Add our Obsidian-specific tools and user-configured MCP servers.
+          mcpServers: this.buildMcpServersConfig(),
 
           // Include streaming updates for real-time UI.
           includePartialMessages: true,

@@ -1,5 +1,6 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, Modal, TextComponent, ButtonComponent } from "obsidian";
 import type ClaudeCodePlugin from "../main";
+import { McpServerConfig } from "../types";
 
 export class ClaudeCodeSettingTab extends PluginSettingTab {
   plugin: ClaudeCodePlugin;
@@ -184,6 +185,124 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
           })
       );
 
+    // MCP Servers Section.
+    containerEl.createEl("h3", { text: "MCP Servers" });
+
+    const mcpDescEl = containerEl.createDiv({ cls: "setting-item-description" });
+    mcpDescEl.createEl("p", {
+      text: "Add external MCP (Model Context Protocol) servers to extend Claude's capabilities. Each server provides additional tools that Claude can use.",
+    });
+
+    // Add new MCP server button.
+    new Setting(containerEl)
+      .setName("Add MCP Server")
+      .setDesc("Add a new MCP server configuration")
+      .addButton((button) =>
+        button
+          .setButtonText("+ Add Server")
+          .setCta()
+          .onClick(() => {
+            const modal = new McpServerModal(this.app, null, async (server) => {
+              if (!this.plugin.settings.mcpServers) {
+                this.plugin.settings.mcpServers = [];
+              }
+              this.plugin.settings.mcpServers.push(server);
+              await this.plugin.saveSettings();
+              this.display(); // Re-render settings.
+            });
+            modal.open();
+          })
+      );
+
+    // List existing MCP servers.
+    const servers = this.plugin.settings.mcpServers || [];
+    if (servers.length > 0) {
+      const serversEl = containerEl.createDiv({ cls: "claude-code-mcp-servers" });
+
+      for (const server of servers) {
+        const serverEl = serversEl.createDiv({ cls: "claude-code-mcp-server-item" });
+
+        // Server info.
+        const infoEl = serverEl.createDiv({ cls: "claude-code-mcp-server-info" });
+        const headerEl = infoEl.createDiv({ cls: "claude-code-mcp-server-header" });
+
+        // Enable/disable toggle.
+        const toggleEl = headerEl.createEl("input", { type: "checkbox" });
+        toggleEl.checked = server.enabled;
+        toggleEl.addEventListener("change", async () => {
+          server.enabled = toggleEl.checked;
+          await this.plugin.saveSettings();
+        });
+
+        headerEl.createEl("span", { text: server.name, cls: "claude-code-mcp-server-name" });
+
+        const detailsEl = infoEl.createDiv({ cls: "claude-code-mcp-server-details" });
+        detailsEl.createEl("code", { text: `${server.command} ${server.args.join(" ")}` });
+
+        // Actions.
+        const actionsEl = serverEl.createDiv({ cls: "claude-code-mcp-server-actions" });
+
+        // Edit button.
+        const editBtn = actionsEl.createEl("button", { text: "Edit", cls: "mod-cta" });
+        editBtn.addEventListener("click", () => {
+          const modal = new McpServerModal(this.app, server, async (updated) => {
+            Object.assign(server, updated);
+            await this.plugin.saveSettings();
+            this.display();
+          });
+          modal.open();
+        });
+
+        // Delete button.
+        const deleteBtn = actionsEl.createEl("button", { text: "Delete", cls: "mod-warning" });
+        deleteBtn.addEventListener("click", async () => {
+          this.plugin.settings.mcpServers = this.plugin.settings.mcpServers.filter(
+            (s) => s.id !== server.id
+          );
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      }
+    }
+
+    // MCP server presets/examples.
+    const presetsEl = containerEl.createDiv({ cls: "claude-code-mcp-presets" });
+    presetsEl.createEl("details", {}, (details) => {
+      details.createEl("summary", { text: "Common MCP Server Examples" });
+
+      const examplesEl = details.createDiv({ cls: "claude-code-mcp-examples" });
+
+      // Filesystem server example.
+      examplesEl.createEl("h5", { text: "Filesystem Server" });
+      examplesEl.createEl("pre", {
+        text: `Command: npx
+Args: -y @anthropic-ai/mcp-server-filesystem /path/to/directory`,
+      });
+
+      // GitHub server example.
+      examplesEl.createEl("h5", { text: "GitHub Server" });
+      examplesEl.createEl("pre", {
+        text: `Command: npx
+Args: -y @anthropic-ai/mcp-server-github
+Env: GITHUB_TOKEN=your_token`,
+      });
+
+      // Web search server example.
+      examplesEl.createEl("h5", { text: "Brave Search Server" });
+      examplesEl.createEl("pre", {
+        text: `Command: npx
+Args: -y @anthropic-ai/mcp-server-brave-search
+Env: BRAVE_API_KEY=your_key`,
+      });
+
+      // Database server example.
+      examplesEl.createEl("h5", { text: "SQLite Server" });
+      examplesEl.createEl("pre", {
+        text: `Command: npx
+Args: -y @anthropic-ai/mcp-server-sqlite /path/to/database.db`,
+      });
+    });
+
     // About Section.
     containerEl.createEl("h3", { text: "About" });
 
@@ -194,5 +313,150 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
     aboutEl.createEl("p", {
       text: "Features: Built-in tools (Read, Write, Bash, Grep), skill loading from .claude/skills/, Obsidian-specific tools (open files, run commands), and semantic vault search.",
     });
+  }
+}
+
+// Modal for adding/editing MCP server configuration.
+class McpServerModal extends Modal {
+  private server: McpServerConfig | null;
+  private onSave: (server: McpServerConfig) => void;
+
+  // Form fields.
+  private nameInput!: TextComponent;
+  private commandInput!: TextComponent;
+  private argsInput!: TextComponent;
+  private envInput!: HTMLTextAreaElement;
+
+  constructor(app: App, server: McpServerConfig | null, onSave: (server: McpServerConfig) => void) {
+    super(app);
+    this.server = server;
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+
+    contentEl.createEl("h2", { text: this.server ? "Edit MCP Server" : "Add MCP Server" });
+
+    // Name field.
+    new Setting(contentEl)
+      .setName("Server Name")
+      .setDesc("A unique name to identify this server")
+      .addText((text) => {
+        this.nameInput = text;
+        text
+          .setPlaceholder("e.g., filesystem, github")
+          .setValue(this.server?.name || "");
+      });
+
+    // Command field.
+    new Setting(contentEl)
+      .setName("Command")
+      .setDesc("The command to run (e.g., npx, node, python)")
+      .addText((text) => {
+        this.commandInput = text;
+        text
+          .setPlaceholder("npx")
+          .setValue(this.server?.command || "npx");
+      });
+
+    // Args field.
+    new Setting(contentEl)
+      .setName("Arguments")
+      .setDesc("Space-separated arguments (e.g., -y @anthropic-ai/mcp-server-filesystem /path)")
+      .addText((text) => {
+        this.argsInput = text;
+        text
+          .setPlaceholder("-y @anthropic-ai/mcp-server-xxx")
+          .setValue(this.server?.args?.join(" ") || "");
+        // Make input wider.
+        text.inputEl.style.width = "300px";
+      });
+
+    // Environment variables field.
+    const envSetting = new Setting(contentEl)
+      .setName("Environment Variables")
+      .setDesc("One per line: KEY=value");
+
+    this.envInput = envSetting.controlEl.createEl("textarea", {
+      cls: "claude-code-mcp-env-input",
+      attr: {
+        placeholder: "GITHUB_TOKEN=xxx\nAPI_KEY=yyy",
+        rows: "4",
+      },
+    });
+    this.envInput.style.width = "300px";
+    this.envInput.style.fontFamily = "monospace";
+
+    // Populate env if editing.
+    if (this.server?.env) {
+      this.envInput.value = Object.entries(this.server.env)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n");
+    }
+
+    // Buttons.
+    const buttonEl = contentEl.createDiv({ cls: "claude-code-modal-buttons" });
+    buttonEl.style.display = "flex";
+    buttonEl.style.justifyContent = "flex-end";
+    buttonEl.style.gap = "8px";
+    buttonEl.style.marginTop = "16px";
+
+    const cancelBtn = buttonEl.createEl("button", { text: "Cancel" });
+    cancelBtn.addEventListener("click", () => this.close());
+
+    const saveBtn = buttonEl.createEl("button", { text: "Save", cls: "mod-cta" });
+    saveBtn.addEventListener("click", () => this.save());
+  }
+
+  private save() {
+    const name = this.nameInput.getValue().trim();
+    const command = this.commandInput.getValue().trim();
+    const argsStr = this.argsInput.getValue().trim();
+
+    // Validation.
+    if (!name) {
+      new (require("obsidian").Notice)("Server name is required");
+      return;
+    }
+    if (!command) {
+      new (require("obsidian").Notice)("Command is required");
+      return;
+    }
+
+    // Parse args.
+    const args = argsStr ? argsStr.split(/\s+/) : [];
+
+    // Parse env.
+    const env: Record<string, string> = {};
+    const envLines = this.envInput.value.split("\n").filter((l) => l.trim());
+    for (const line of envLines) {
+      const eqIndex = line.indexOf("=");
+      if (eqIndex > 0) {
+        const key = line.slice(0, eqIndex).trim();
+        const value = line.slice(eqIndex + 1).trim();
+        if (key) {
+          env[key] = value;
+        }
+      }
+    }
+
+    const server: McpServerConfig = {
+      id: this.server?.id || `mcp-${Date.now()}`,
+      name,
+      command,
+      args,
+      env: Object.keys(env).length > 0 ? env : undefined,
+      enabled: this.server?.enabled ?? true,
+    };
+
+    this.onSave(server);
+    this.close();
+  }
+
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
   }
 }

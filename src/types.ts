@@ -25,6 +25,9 @@ export interface ClaudeCodeSettings {
 
   // Agent SDK settings.
   maxTurns: number;
+
+  // MCP Server configurations.
+  mcpServers: McpServerConfig[];
 }
 
 // Default settings values.
@@ -38,6 +41,7 @@ export const DEFAULT_SETTINGS: ClaudeCodeSettings = {
   sidebarWidth: 400,
   maxBudgetPerSession: 10.0,
   maxTurns: 50,
+  mcpServers: [],
 };
 
 // Error classification for retry and display logic.
@@ -141,6 +145,22 @@ export interface SlashCommand {
   description: string;
   path: string;
   template: string;
+}
+
+// MCP Server configuration.
+export interface McpServerConfig {
+  // Unique identifier for this server.
+  id: string;
+  // Display name for the server.
+  name: string;
+  // Command to run (e.g., "npx", "node", "python").
+  command: string;
+  // Arguments to pass to the command.
+  args: string[];
+  // Optional environment variables.
+  env?: Record<string, string>;
+  // Whether this server is enabled.
+  enabled: boolean;
 }
 
 // File suggestion for autocomplete.

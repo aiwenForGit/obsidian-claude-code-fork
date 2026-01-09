@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
   "description": "Claude Code AI assistant for Obsidian with MCP integration - Cursor-style chat sidebar for vault operations and task automation",
-  "author": "roasbeef",
+  "author": "zhangmg",
   "authorUrl": "https://github.com/roasbeef",
   "isDesktopOnly": true
 }

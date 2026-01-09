@@ -62,6 +62,9 @@ export class MessageRenderer {
   private makeVaultPathsClickable() {
     if (!this.contentEl) return;
 
+    // First, process Obsidian-style internal links [[link]] that weren't rendered properly.
+    this.processObsidianLinks(this.contentEl);
+
     // Find all code elements and links that might contain file paths.
     const codeElements = this.contentEl.querySelectorAll("code");
     const linkElements = this.contentEl.querySelectorAll("a");
@@ -85,9 +88,63 @@ export class MessageRenderer {
       }
     });
 
-    // Also look for text nodes that contain file paths in backticks (already processed) or plain text.
-    // This handles paths that Claude outputs as plain text like "pages/ark.md".
+    // Also look for text nodes that contain file paths.
     this.processTextNodes(this.contentEl);
+  }
+
+  // Process Obsidian-style internal links [[link]] or [[link|display text]].
+  private processObsidianLinks(element: HTMLElement) {
+    // Pattern to match [[link]] or [[link|display]]
+    const wikiLinkPattern = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
+    const nodesToReplace: { node: Text; matches: RegExpMatchArray[] }[] = [];
+
+    let node: Text | null;
+    while ((node = walker.nextNode() as Text | null)) {
+      const text = node.textContent || "";
+      const matches = [...text.matchAll(wikiLinkPattern)];
+      if (matches.length > 0) {
+        const parent = node.parentElement;
+        if (parent && !parent.matches("a, code, .claude-code-vault-link")) {
+          nodesToReplace.push({ node, matches });
+        }
+      }
+    }
+
+    for (const { node, matches } of nodesToReplace) {
+      const text = node.textContent || "";
+      const fragment = document.createDocumentFragment();
+      let lastIndex = 0;
+
+      for (const match of matches) {
+        const fullMatch = match[0];
+        const linkPath = match[1];  // The actual path/filename.
+        const displayText = match[2] || linkPath;  // Display text or fallback to path.
+        const startIndex = match.index!;
+
+        // Add text before the match.
+        if (startIndex > lastIndex) {
+          fragment.appendChild(document.createTextNode(text.slice(lastIndex, startIndex)));
+        }
+
+        // Create clickable link.
+        const span = document.createElement("span");
+        span.textContent = displayText;
+        span.className = "claude-code-vault-link";
+        span.title = linkPath;  // Show full path on hover.
+        this.makeClickable(span, linkPath);
+        fragment.appendChild(span);
+
+        lastIndex = startIndex + fullMatch.length;
+      }
+
+      if (lastIndex < text.length) {
+        fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+      }
+
+      node.replaceWith(fragment);
+    }
   }
 
   // Check if a string looks like a vault file path.
@@ -97,20 +154,23 @@ export class MessageRenderer {
       return false;
     }
 
+    // Skip empty or very short strings.
+    if (!text || text.length < 3) {
+      return false;
+    }
+
     // Common vault file extensions.
     const extensions = [".md", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".canvas"];
     const lowerText = text.toLowerCase();
 
-    // Check if it ends with a known extension.
+    // Check if it ends with a known extension - always treat as vault path.
     if (extensions.some((ext) => lowerText.endsWith(ext))) {
-      // Verify the file exists in the vault.
-      return this.findFile(text) !== null;
+      return true;
     }
 
-    // Check if it looks like a relative path (contains /).
-    if (text.includes("/") || text.includes("\\")) {
-      // Verify the file exists in the vault.
-      return this.findFile(text) !== null;
+    // Check if it looks like a relative path (contains / or \).
+    if ((text.includes("/") || text.includes("\\")) && !text.includes(" ")) {
+      return true;
     }
 
     return false;
@@ -144,6 +204,7 @@ export class MessageRenderer {
   // Try to find a file by path with various fallbacks.
   private findFile(path: string): TFile | null {
     const normalized = this.normalizePath(path);
+    const allFiles = this.plugin.app.vault.getFiles();
 
     // Try exact path.
     let file = this.plugin.app.vault.getAbstractFileByPath(normalized);
@@ -157,13 +218,30 @@ export class MessageRenderer {
 
     // Try without leading folder paths (search by filename).
     const filename = normalized.split("/").pop() || normalized;
-    const allFiles = this.plugin.app.vault.getFiles();
-    const match = allFiles.find((f) =>
-      f.path === normalized ||
-      f.path.endsWith("/" + normalized) ||
-      f.name === filename ||
-      f.basename === filename.replace(/\.md$/, "")
-    );
+    const filenameWithoutExt = filename.replace(/\.(md|txt|pdf|png|jpg|jpeg|gif|svg|canvas)$/i, "");
+
+    // Search through all files with multiple matching strategies.
+    const match = allFiles.find((f) => {
+      // Exact path match.
+      if (f.path === normalized) return true;
+
+      // Path ends with our normalized path.
+      if (f.path.endsWith("/" + normalized)) return true;
+
+      // Exact filename match.
+      if (f.name === filename) return true;
+
+      // Basename match (without extension).
+      if (f.basename === filenameWithoutExt) return true;
+
+      // Case-insensitive path match.
+      if (f.path.toLowerCase() === normalized.toLowerCase()) return true;
+
+      // Case-insensitive filename match.
+      if (f.name.toLowerCase() === filename.toLowerCase()) return true;
+
+      return false;
+    });
 
     return match || null;
   }
@@ -191,55 +269,108 @@ export class MessageRenderer {
 
   // Process text nodes to find and wrap file paths.
   private processTextNodes(element: HTMLElement) {
-    // Pattern to match file paths like "pages/ark.md" or "journals/2025-07-29.md".
-    const pathPattern = /\b([a-zA-Z0-9_\-./]+\.(md|txt|pdf|png|jpg|jpeg|gif|svg|canvas))\b/g;
+    // Multiple patterns to match different file path formats:
+    // 1. Paths ending with known extensions (supports spaces in path for Chinese filenames).
+    // 2. Markdown-style links [text](path).
+    const patterns = [
+      // Pattern 1: File paths with extensions - match until we hit certain delimiters.
+      // This captures paths like "文档/我的笔记.md" or "pages/my note.md".
+      /([^\n\r\[\]<>"`]+\.(md|txt|pdf|png|jpg|jpeg|gif|svg|canvas))(?=[\s\n\r,;:)\]<>"]|$)/gi,
+
+      // Pattern 2: Markdown links [text](path) where path looks like a vault file.
+      /\[([^\]]+)\]\(([^)]+\.(md|txt|pdf|png|jpg|jpeg|gif|svg|canvas))\)/gi,
+    ];
 
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
-    const nodesToReplace: { node: Text; matches: RegExpMatchArray[] }[] = [];
+    const nodesToProcess: Text[] = [];
 
     let node: Text | null;
     while ((node = walker.nextNode() as Text | null)) {
-      const text = node.textContent || "";
-      const matches = [...text.matchAll(pathPattern)];
-      if (matches.length > 0) {
-        // Check if parent is already a link or code element.
-        const parent = node.parentElement;
-        if (parent && !parent.matches("a, code, .claude-code-vault-link")) {
-          nodesToReplace.push({ node, matches });
-        }
+      const parent = node.parentElement;
+      if (parent && !parent.matches("a, code, pre, .claude-code-vault-link")) {
+        nodesToProcess.push(node);
       }
     }
 
-    // Replace text nodes with clickable spans.
-    for (const { node, matches } of nodesToReplace) {
-      const text = node.textContent || "";
+    for (const textNode of nodesToProcess) {
+      let text = textNode.textContent || "";
+      let hasMatch = false;
       const fragment = document.createDocumentFragment();
       let lastIndex = 0;
 
-      for (const match of matches) {
-        const path = match[1];
-        const startIndex = match.index!;
+      // Find all matches from all patterns.
+      interface PathMatch {
+        index: number;
+        length: number;
+        path: string;
+        displayText: string;
+      }
+      const allMatches: PathMatch[] = [];
 
+      // Pattern 1: Simple file paths.
+      const pattern1 = /([^\n\r\[\]<>"`|]+\.(md|txt|pdf|png|jpg|jpeg|gif|svg|canvas))(?=[\s\n\r,;:)\]<>"|]|$)/gi;
+      let match: RegExpExecArray | null;
+      while ((match = pattern1.exec(text)) !== null) {
+        const path = match[1].trim();
+        // Skip if path starts with http or contains ://.
+        if (path.includes("://") || path.startsWith("http")) continue;
+        // Skip very short paths.
+        if (path.length < 3) continue;
+
+        allMatches.push({
+          index: match.index,
+          length: match[0].length,
+          path: path,
+          displayText: path,
+        });
+      }
+
+      // Pattern 2: Markdown links [text](path.md).
+      const pattern2 = /\[([^\]]+)\]\(([^)]+\.(md|txt|pdf|png|jpg|jpeg|gif|svg|canvas))\)/gi;
+      while ((match = pattern2.exec(text)) !== null) {
+        const displayText = match[1];
+        const path = match[2];
+        if (path.includes("://") || path.startsWith("http")) continue;
+
+        allMatches.push({
+          index: match.index,
+          length: match[0].length,
+          path: path,
+          displayText: displayText,
+        });
+      }
+
+      // Sort matches by index and remove overlaps.
+      allMatches.sort((a, b) => a.index - b.index);
+      const filteredMatches: PathMatch[] = [];
+      let lastEnd = 0;
+      for (const m of allMatches) {
+        if (m.index >= lastEnd) {
+          filteredMatches.push(m);
+          lastEnd = m.index + m.length;
+        }
+      }
+
+      if (filteredMatches.length === 0) continue;
+
+      hasMatch = true;
+      for (const m of filteredMatches) {
         // Add text before the match.
-        if (startIndex > lastIndex) {
-          fragment.appendChild(document.createTextNode(text.slice(lastIndex, startIndex)));
+        if (m.index > lastIndex) {
+          fragment.appendChild(document.createTextNode(text.slice(lastIndex, m.index)));
         }
 
-        // Check if this path exists in the vault before making it clickable.
-        const file = this.findFile(path);
-        if (file) {
-          // Create clickable span.
-          const span = document.createElement("span");
-          span.textContent = path;
-          span.className = "claude-code-vault-link";
-          this.makeClickable(span, path);
-          fragment.appendChild(span);
-        } else {
-          // Just add the text as-is if file doesn't exist.
-          fragment.appendChild(document.createTextNode(path));
+        // Create clickable link.
+        const span = document.createElement("span");
+        span.textContent = m.displayText;
+        span.className = "claude-code-vault-link";
+        if (m.path !== m.displayText) {
+          span.title = m.path;
         }
+        this.makeClickable(span, m.path);
+        fragment.appendChild(span);
 
-        lastIndex = startIndex + match[0].length;
+        lastIndex = m.index + m.length;
       }
 
       // Add remaining text.
@@ -247,7 +378,9 @@ export class MessageRenderer {
         fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
       }
 
-      node.replaceWith(fragment);
+      if (hasMatch) {
+        textNode.replaceWith(fragment);
+      }
     }
   }
 
